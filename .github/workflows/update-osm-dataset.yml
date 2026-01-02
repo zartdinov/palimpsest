@@ -1,0 +1,95 @@
+name: Update OSM Dataset
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run weekly on Sundays at 00:00 UTC
+    - cron: '0 0 * * 0'
+
+jobs:
+  convert-and-publish:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        region:
+          - asia/armenia
+          - asia/azerbaijan
+          - asia/kazakhstan
+          - asia/kyrgyzstan
+          - asia/maldives
+          - asia/south-korea
+          - europe/france/alsace
+          - europe/france/aquitaine
+          - europe/france/auvergne
+          - europe/france/basse-normandie
+          - europe/france/bourgogne
+          - europe/spain/andalucia
+          - europe/spain/aragon
+          - europe/spain/asturias
+          - europe/spain/cantabria
+          - europe/spain/castilla-la-mancha
+          - russia/central-fed-district
+          - russia/crimean-fed-district
+          - russia/far-eastern-fed-district
+          - russia/north-caucasus-fed-district
+          - russia/northwestern-fed-district
+          - russia/siberian-fed-district
+          - russia/south-fed-district
+          - russia/ural-fed-district
+          - russia/volga-fed-district
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download PBF from Geofabrik
+        run: |
+          mkdir -p data/${{ matrix.region }}
+          curl -L -o data/${{ matrix.region }}.osm.pbf \
+            https://download.geofabrik.de/${{ matrix.region }}-latest.osm.pbf
+          ls -lh data/${{ matrix.region }}.osm.pbf
+
+      - name: Convert PBF to Parquet using QuackOSM
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/data:/data \
+            ${{ vars.QUACKOSM_IMAGE }} \
+            /data/${{ matrix.region }}.osm.pbf \
+            --output /data/${{ matrix.region }}.parquet
+          ls -lh data/${{ matrix.region }}.parquet
+
+      - name: Setup SSH for Hugging Face
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HF_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan hf.co >> ~/.ssh/known_hosts
+
+      - name: Install git-xet
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/huggingface/xet-core/refs/heads/main/git_xet/install.sh | sh
+          git xet install
+
+      - name: Clone Hugging Face Dataset (shallow, no file download)
+        run: |
+          GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 git@hf.co:${{ vars.HUGGINGFACE_REPOSITORY }} hf-dataset
+
+      - name: Copy parquet and commit
+        working-directory: hf-dataset
+        run: |
+          mkdir -p $(dirname ${{ matrix.region }})
+          cp ../data/${{ matrix.region }}.parquet ${{ matrix.region }}.parquet
+          
+          git config user.name "${{ vars.GIT_CONFIG_USER_NAME }}"
+          git config user.email "${{ vars.GIT_CONFIG_USER_EMAIL }}"
+          
+          git add ${{ matrix.region }}.parquet
+          git commit -m "Update ${{ matrix.region }} ($(date -u +%Y-%m-%d))" || echo "No changes to commit"
+
+      - name: Push to Hugging Face
+        working-directory: hf-dataset
+        run: |
+          git push
